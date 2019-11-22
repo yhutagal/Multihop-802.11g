@@ -1,0 +1,276 @@
+
+/* -*-  Mode: C++; c-file-style: "gnu"; indent-tabs-mode:nil; -*- */
+/*
+ * Copyright (c) 2009 The Boeing Company
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation;
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+ *
+ */
+
+// This script configures four nodes on an 802.11g physical layer (Multi-Hop Scenario), with
+// 802.11g NICs in adhoc mode, and by default, sends packet (application) bytes from first node
+// to the last node.
+/*
+ *     Tx     AP 1    AP 2    AP 3     AP 4    Rx
+ *      X ----- o ----- o ----- o ----- o ----- X
+ *      Yohanees Hutagalung
+ *///   11136167  
+//
+// There are a number of command-line options available to control
+// the default behavior.  The list of available command-line options
+// can be listed with the following command:
+// ./waf --run "multihop_802.11g --help"
+//
+
+
+#include "ns3/core-module.h"
+#include "ns3/mobility-module.h"
+#include "ns3/wifi-module.h"
+#include "ns3/internet-module.h"
+#include "ns3/applications-module.h"
+#include "ns3/olsr-module.h"
+#include "ns3/network-module.h"
+#include "ns3/flow-monitor-module.h"
+#include "ns3/animation-interface.h"
+
+
+using namespace ns3;
+
+NS_LOG_COMPONENT_DEFINE ("Multihop 802.11g WiFi Network");
+
+
+int main (int argc, char *argv[])
+{
+  std::string app ("echo");
+  double simulationTime = 300; //seconds
+  uint32_t packetSizeUdp = 1472; // Udp packet size in bytes
+  uint32_t packetSizeTcp = 1460; // Tcp packet size in bytes
+  double interval = 0.0001; // seconds
+  double distance = 20; //metres
+  uint16_t NumNodes = 4; //nodes (AP)
+  double Width = 20.0; //channel width in MHz
+  double datarate = 100.0; //Mbps
+  std::string CSVfileName = "Multihop_80211g.csv";
+
+  //To Enable Users supply parameters at command prompt
+  CommandLine cmd;
+
+  cmd.AddValue ("app", "Type of Application needed", app);
+  cmd.AddValue ("simulationTime", "Simulation time in seconds", simulationTime);
+  cmd.AddValue ("interval", "interval (seconds) between packets", interval);
+  cmd.AddValue ("distance", "distance between two nodes", distance);
+  cmd.AddValue ("NumNodes", "Number of nodes", NumNodes);
+  cmd.Parse (argc, argv);
+
+  // Convert to time object
+  Time interPacketInterval = Seconds (interval);
+
+  //Create nodes
+  NodeContainer CrNode;
+  CrNode.Create (NumNodes);
+
+  // The below set of helpers will help us to put together the wifi NICs we want
+  WifiHelper wifi;
+
+  //Set Wifi standard for network
+  wifi.SetStandard (WIFI_PHY_STANDARD_80211g);
+  YansWifiPhyHelper wifiPhy =  YansWifiPhyHelper::Default ();
+  wifiPhy.Set ("TxPowerStart", DoubleValue(1.0)); //assigns Transmission power start
+  wifiPhy.Set ("TxPowerEnd", DoubleValue(1.0)); //assigns Transmission power end
+  wifiPhy.Set ("TxGain", DoubleValue(1.0)); //assigns Transmitter Gain
+  wifiPhy.Set ("RxGain", DoubleValue (1.0) ); //assigns Receiver Gain
+  wifiPhy.Set ("ChannelWidth", UintegerValue (Width)); //assigns channel width
+
+  //Enable Tracing extension for the 802.11 standard
+  wifiPhy.SetPcapDataLinkType (WifiPhyHelper::DLT_IEEE802_11_RADIO);
+
+  //Create Wifi Channel and set propagation
+  YansWifiChannelHelper wifiChannel;
+  wifiChannel.SetPropagationDelay ("ns3::ConstantSpeedPropagationDelayModel");
+  wifiChannel.AddPropagationLoss ("ns3::FriisPropagationLossModel");
+  wifiPhy.SetChannel (wifiChannel.Create ());
+
+  // Configure MAC on the wifi devices
+  WifiMacHelper wifiMac;
+  wifi.SetRemoteStationManager ("ns3::MinstrelWifiManager");
+
+  // Set it to adhoc mode
+  wifiMac.SetType ("ns3::AdhocWifiMac");
+  NetDeviceContainer devices = wifi.Install (wifiPhy, wifiMac, CrNode);
+
+  //Set position of nodes
+  MobilityHelper mobility;
+  Ptr<ListPositionAllocator> positionAlloc = CreateObject<ListPositionAllocator> ();
+  positionAlloc->Add (Vector (0.0, 0.0, 0.0));   //node 0
+  positionAlloc->Add (Vector ((distance), 0.0, 0.0)); //node 1
+  positionAlloc->Add (Vector ((2*distance), 0.0, 0.0)); //node 2
+  positionAlloc->Add (Vector ((3*distance), 0.0, 0.0)); //node 3
+  mobility.SetPositionAllocator (positionAlloc);
+  mobility.SetMobilityModel ("ns3::ConstantPositionMobilityModel");
+  mobility.Install (CrNode);
+
+  //  Enable OLSR
+  OlsrHelper olsr;
+  Ipv4StaticRoutingHelper staticRouting;
+
+  // Install the routing protocol
+  Ipv4ListRoutingHelper list;
+  list.Add (staticRouting, 0);
+  list.Add (olsr, 10);
+
+  //Create internet stack and install on nodes
+  InternetStackHelper internet;
+  internet.SetRoutingHelper (list);
+  internet.Install (CrNode);
+
+  //Implement Ipv4 address helper for ip address assignment
+  Ipv4AddressHelper ipv4;
+  NS_LOG_INFO ("Assign IP Addresses.");
+  ipv4.SetBase ("192.168.1.0", "255.255.255.0");
+  Ipv4InterfaceContainer i = ipv4.Assign (devices);
+
+  /* Setting applications */
+  if (app=="echo"){
+      // Echo flow
+      // Create a UdpEchoServer application on last node.
+      //
+      Address serverAddress;
+      serverAddress = Address(i.GetAddress (NumNodes - 1));
+      uint16_t port = 9;  //set port number
+      UdpEchoServerHelper server (port);
+      ApplicationContainer Serverapp = server.Install (CrNode.Get (NumNodes - 1));
+      Serverapp.Start (Seconds (1.0));
+      Serverapp.Stop (Seconds (simulationTime));
+
+      //
+      // Create a UdpEchoClient application to send UDP datagrams from first node to
+      // last node.
+      //
+      uint32_t maxPacketCount = 7000000; //maximum number of packets that can be transmitted
+      UdpEchoClientHelper client (serverAddress, port);
+      client.SetAttribute ("MaxPackets", UintegerValue (maxPacketCount));
+      client.SetAttribute ("Interval", TimeValue (interPacketInterval));
+      client.SetAttribute ("PacketSize", UintegerValue (packetSizeUdp));
+      ApplicationContainer Clientapp = client.Install (CrNode.Get (0));
+      Clientapp.Start (Seconds (2.0));
+      Clientapp.Stop (Seconds (simulationTime));
+    }
+  else if (app=="udp"){
+
+      NS_LOG_INFO ("Udp Applications.");
+      //
+      // Create one udpServer application on last node.
+      //
+      Address serverAddress;
+      serverAddress = Address(i.GetAddress (NumNodes - 1));
+      uint16_t port = 9;
+      UdpServerHelper server (port);
+      ApplicationContainer apps = server.Install (CrNode.Get (NumNodes - 1));
+      apps.Start (Seconds (1.0));
+      apps.Stop (Seconds (simulationTime));
+
+      //
+      // Create one UdpClient application to send UDP datagrams from first node to
+      // last node.
+      //
+      uint32_t maxPacketCount = 7000000;
+      UdpClientHelper client (serverAddress, port);
+      client.SetAttribute ("MaxPackets", UintegerValue (maxPacketCount));
+      client.SetAttribute ("Interval", TimeValue (interPacketInterval));
+      client.SetAttribute ("PacketSize", UintegerValue (packetSizeUdp));
+      apps = client.Install (CrNode.Get (0));
+      apps.Start (Seconds (2.0));
+      apps.Stop (Seconds (simulationTime));
+    }
+  else if (app=="tcp"){
+
+      //TCP flow
+      ApplicationContainer serverApp;
+      uint16_t port = 80;
+      Address localAddress (InetSocketAddress (Ipv4Address::GetAny (), port));
+      PacketSinkHelper packetSinkHelper ("ns3::TcpSocketFactory", localAddress);
+      serverApp = packetSinkHelper.Install (CrNode.Get (NumNodes - 1));
+      serverApp.Start (Seconds (1.0));
+      serverApp.Stop (Seconds (simulationTime));
+      OnOffHelper onoff ("ns3::TcpSocketFactory", Ipv4Address::GetAny ());
+      onoff.SetAttribute ("OnTime",  StringValue ("ns3::ConstantRandomVariable[Constant=1]"));
+      onoff.SetAttribute ("OffTime", StringValue ("ns3::ConstantRandomVariable[Constant=0]"));
+      onoff.SetAttribute ("PacketSize", UintegerValue (packetSizeTcp));
+      onoff.SetAttribute ("DataRate", DataRateValue (datarate * 1000000)); //bit/s
+      AddressValue remoteAddress (InetSocketAddress (i.GetAddress (NumNodes - 1), port));
+      onoff.SetAttribute ("Remote", remoteAddress);
+      ApplicationContainer clientApp = onoff.Install (CrNode.Get (0));
+      clientApp.Start (Seconds (2.0));
+      clientApp.Stop (Seconds (simulationTime));
+    }
+
+  //Enable tracing on pcap and xml
+  wifiPhy.EnablePcapAll ("Multi_hop"); //Pcap generation
+  AnimationInterface anim ("multi_hop.xml"); //Animation generation
+  anim.SetMaxPktsPerTraceFile(2000000); //set maximum number of packets per trace file
+
+  /* Print Output */
+  //Install FlowMonitor on all nodes
+  Ptr<FlowMonitor> monitor;
+    FlowMonitorHelper flowmon;
+    monitor = flowmon.InstallAll ();
+
+  // Run simulation
+  Simulator::Stop (Seconds (simulationTime));
+  Simulator::Run ();
+
+  // Print per flow statistics
+  monitor->CheckForLostPackets ();
+  Ptr<Ipv4FlowClassifier> classifier = DynamicCast<Ipv4FlowClassifier> (flowmon.GetClassifier ());
+  FlowMonitor::FlowStatsContainer stats = monitor->GetFlowStats ();
+  for (std::map<FlowId, FlowMonitor::FlowStats>::const_iterator i = stats.begin (); i != stats.end (); ++i)
+    {
+      //
+      // Duration for throughput measurement is simulation time - 1 second, since
+      //   StartTime of the OnOffApplication is at about "second 1"
+      // and
+      //   Simulator::Stops at default "second 80".
+      if (i->first > 0)
+        {
+          Ipv4FlowClassifier::FiveTuple t = classifier->FindFlow (i->first);
+          std::cout << "Flow " << i->first - 2 << " (" << t.sourceAddress << " -> " << t.destinationAddress << ")\n";
+          std::cout << "  Tx Packets: " << i->second.txPackets << "\n";
+          std::cout << "  Tx Bytes:   " << i->second.txBytes << "\n";
+          std::cout << "  Tx Offered:  " << i->second.txBytes * 8.0 / (simulationTime - 1) / 1000 / 1000  << " Mbps\n";
+          std::cout << "  Rx Packets: " << i->second.rxPackets << "\n";
+          std::cout << "  Rx Bytes:   " << i->second.rxBytes << "\n";
+          std::cout << "  Throughput: " << i->second.rxBytes * 8.0 / (simulationTime - 1) / 1000 / 1000  << " Mbps\n";
+          std::cout << "  Distance: " << distance << "\n";
+          std::cout << "  Hops: " << NumNodes - 1 << "\n";
+          std::cout << "  Simulation Time: " << simulationTime << "\n\n";
+
+          //Print out the flow monitor in csv form
+          std::ofstream out (CSVfileName.c_str (), std::ios::app);
+          out << "Flow " << i->first - 2 << " (" << t.sourceAddress << " -> " << t.destinationAddress << ")\n"
+         " Tx Packets: " << i->second.txPackets << "\n"
+         " TxOffered:  " << i->second.txBytes * 8.0 / (simulationTime - 1) / 1000 / 1000  << " Mbps\n"
+         " Rx Packets: " << i->second.rxPackets << "\n"
+         " Rx Bytes:   " << i->second.rxBytes << "\n"
+         " Throughput: " << i->second.rxBytes * 8.0 / (simulationTime - 1) / 1000 / 1000  << " Mbps\n"
+         " Distance: " << distance << "\n"
+         "  Hops: " << NumNodes - 1 << "\n"
+         "  Simulation Time: " << simulationTime << "\n" <<
+          std::endl;
+          out.close ();
+        }
+    }
+  Simulator::Destroy ();
+
+  return 0;
+}
